@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Michler Civil War Maps – Live GPS</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, sans-serif; background: #1a1a1a; }
+
+  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 88px; }
+
+  #controls {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 88px;
+    background: #1a1a1a; border-top: 1px solid #333;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 8px; padding: 8px 12px; z-index: 1000;
+  }
+
+  #btn-row { display: flex; gap: 8px; }
+
+  button {
+    padding: 10px 16px; border: none; border-radius: 9px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: opacity 0.15s;
+  }
+  button:active { opacity: 0.7; }
+
+  #btn-center  { background: #2563eb; color: #fff; }
+  #btn-toggle  { background: #4b5563; color: #f3f4f6; }
+  #btn-opacity { background: #4b5563; color: #f3f4f6; }
+
+  #coords { font-size: 12px; color: #9ca3af; text-align: center; }
+
+  #status-bar {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.75); color: #fff;
+    padding: 6px 16px; border-radius: 20px;
+    font-size: 12px; z-index: 999; pointer-events: none;
+    max-width: 90vw; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    display: none;
+  }
+
+  .gps-dot {
+    width: 16px; height: 16px;
+    background: #ef4444; border: 3px solid #fff; border-radius: 50%;
+    box-shadow: 0 0 0 3px rgba(239,68,68,0.4);
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="status-bar"></div>
+<div id="controls">
+  <div id="btn-row">
+    <button id="btn-center">📍 My Location</button>
+    <button id="btn-toggle">🗺 Show Streets</button>
+    <button id="btn-opacity">☀️ Opacity</button>
+  </div>
+  <div id="coords">Waiting for GPS…</div>
+</div>
+
+<script>
+// ─── Config ────────────────────────────────────────────────────────────────
+
+const BASE            = 'https://tiles.arcgis.com/tiles/fBc8EJBxQRMcHlei/arcgis/rest/services';
+const MAX_NATIVE_ZOOM = 16;   // NPS tiles exist up to zoom 16; Leaflet stretches beyond
+const MAX_ZOOM        = 19;
+const MAX_LAYERS      = 9;    // max simultaneous Michler layers (iPhone-safe)
+const BLANK           = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+// Bounding boxes are the true geographic extents of each sheet's imagery,
+// derived from zoom-16 tile coordinates captured directly from the NPS tile
+// server. Sheets marked [z16 corrected] were refined using tile URLs captured
+// at zoom 16 over downtown Richmond, fixing errors in the original zoom-10/12
+// estimates that caused those sheets to miss coverage of 600 E Main St.
+//
+// Esri tile URL order: /tile/{z}/{y}/{x}  (y before x)
+//
+const SHEETS = [
+  { name: '01_Hatchers_Run__Vaughan_Road_jpg',             minLat: 37.1603, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.5195 },
+  { name: '02_Jerusalem_Plank_Road_South_jpg',             minLat: 37.1603, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.3438 },
+  { name: '03_Boydton_Plank_Road_Fort_Fisher_jpg',         minLat: 37.3003, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.5195 },
+  { name: '04_Fort_Sedgwick_to_Fort_Wadsworth_jpg',        minLat: 37.3003, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.3438 },
+  { name: '05_Appomattox_River_West_Matoax_jpg',           minLat: 37.3003, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.5195 },
+  { name: '06_Petersburg_jpg',                             minLat: 37.3003, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.3438 },
+  { name: '07_Swift_Creek_jpg',                            minLat: 37.3003, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.4316 },
+  { name: '08_Appomattox_River_North_Fort_Clifton_jpg',    minLat: 37.3003, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.3438 },
+  { name: '09_Richmond___Petersburg_R_R__Unfinished__jpg', minLat: 37.3003, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.4316 },
+  { name: '10_Point_of_Rocks_jpg',                         minLat: 37.3003, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.3438 },
+  { name: '11_Howlett_Line_Bermuda_Hundred_jpg',           minLat: 37.3702, maxLat: 37.4400, minLon: -77.5195, maxLon: -77.4316 },
+  { name: '12_Bermuda_Hundred_Curles__Neck_jpg',           minLat: 37.3702, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.2559 },
+  { name: '13_Chesterfield_Court_House_jpg',               minLat: 37.3702, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.4316 },
+  { name: '14_Drewry_s__Ft__Harrison__Ft__Brady_jpg',      minLat: 37.3702, maxLat: 37.4400, minLon: -77.6953, maxLon: -77.3438 },
+  { name: '15_Malvern_Hill_jpg',                           minLat: 37.3702, maxLat: 37.4400, minLon: -77.3438, maxLon: -77.2559 },
+  { name: '16_James_River__South_of_Richmond__jpg',        minLat: 37.4400, maxLat: 37.7186, minLon: -77.6953, maxLon: -77.4316 },
+  { name: '17_Fort_Gilmer_jpg',                            minLat: 37.4400, maxLat: 37.7186, minLon: -77.6953, maxLon: -77.3438 },
+  { name: '18_White_Oak_Swamp_Glendale_jpg',               minLat: 37.4400, maxLat: 37.7186, minLon: -77.3438, maxLon: -77.1680 },
+  // [z16 corrected] Real south edge is 37.5272, real east edge is -77.4316
+  { name: '19_Richmond___Manchester_jpg',                  minLat: 37.5272, maxLat: 37.5446, minLon: -77.4701, maxLon: -77.4316 },
+  { name: '20_Seven_Pines_Fair_Oaks_jpg',                  minLat: 37.5097, maxLat: 37.7186, minLon: -77.6953, maxLon: -77.2559 },
+  { name: '21_Meadow_Station_Bottom_s_Bridge_jpg',         minLat: 37.5097, maxLat: 37.7186, minLon: -77.3438, maxLon: -77.2559 },
+  { name: '22_Richmond___West_jpg',                        minLat: 37.5794, maxLat: 37.7186, minLon: -77.6953, maxLon: -77.5195 },
+  // [z16 corrected] Real south edge is 37.5315, not 37.5794
+  { name: '23_Richmond___North_jpg',                       minLat: 37.5315, maxLat: 37.5620, minLon: -77.4811, maxLon: -77.4261 },
+  { name: '24_Cold_Harbor___South_jpg',                    minLat: 37.5794, maxLat: 37.7186, minLon: -77.6953, maxLon: -77.2559 },
+  { name: '25_Southeast_of_Cold_Harbor_NARA_jpg',          minLat: 37.5794, maxLat: 37.7186, minLon: -77.3438, maxLon: -77.1680 },
+  { name: '26_Staples__Mill_Yellow_Tavern_jpg',            minLat: 37.6490, maxLat: 37.7186, minLon: -77.6953, maxLon: -77.5195 },
+  { name: '27_Mechanicsville_Beaver_Dam_Creek_jpg',        minLat: 37.6490, maxLat: 37.7186, minLon: -77.6953, maxLon: -77.3438 },
+  { name: '28_Cold_Harbor___North_jpg',                    minLat: 37.6490, maxLat: 37.7186, minLon: -77.3438, maxLon: -77.2559 },
+  { name: 'Michler_Five_Forks_jpg',                        minLat: 37.1603, maxLat: 37.3003, minLon: -77.6953, maxLon: -77.5195 },
+  { name: 'Totopotomoy__1864__Sheet',                      minLat: 37.6490, maxLat: 37.9962, minLon: -77.6953, maxLon: -77.2559 },
+].map(s => ({
+  ...s,
+  cLat: (s.minLat + s.maxLat) / 2,
+  cLon: (s.minLon + s.maxLon) / 2,
+}));
+
+// ─── Distance: GPS point to nearest point on sheet bounding box ────────────
+// Returns 0 if the GPS point is inside the sheet — guaranteeing any sheet
+// the user is actually standing within scores better than any sheet they are
+// outside of, regardless of where the sheet centre happens to be.
+function distSqPointToBox(lat, lon, sheet) {
+  const clampedLat = Math.max(sheet.minLat, Math.min(sheet.maxLat, lat));
+  const clampedLon = Math.max(sheet.minLon, Math.min(sheet.maxLon, lon));
+  const dLat = lat - clampedLat;
+  const dLon = lon - clampedLon;
+  return dLat * dLat + dLon * dLon;
+}
+
+// Distance from sheet centre to nearest point of a viewport bounding box
+// (used when there is no GPS fix yet)
+function distSqCentreToBox(sheet, s, n, w, e) {
+  const clampedLat = Math.max(s, Math.min(n, sheet.cLat));
+  const clampedLon = Math.max(w, Math.min(e, sheet.cLon));
+  const dLat = sheet.cLat - clampedLat;
+  const dLon = sheet.cLon - clampedLon;
+  return dLat * dLat + dLon * dLon;
+}
+
+// ─── Map setup ─────────────────────────────────────────────────────────────
+
+const map = L.map('map', {
+  center: [37.5407, -77.4360],
+  zoom: 15,
+  zoomControl: true,
+  attributionControl: true
+});
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  attribution: '© <a href="https://carto.com">CARTO</a> © <a href="https://openstreetmap.org">OSM</a>',
+  subdomains: 'abcd',
+  maxZoom: MAX_ZOOM
+}).addTo(map);
+
+// ─── Status bar ────────────────────────────────────────────────────────────
+
+const statusEl = document.getElementById('status-bar');
+let statusTimer = null;
+function showStatus(msg, dur = 3000) {
+  clearTimeout(statusTimer);
+  statusEl.textContent = msg;
+  statusEl.style.display = 'block';
+  if (dur > 0) statusTimer = setTimeout(() => { statusEl.style.display = 'none'; }, dur);
+}
+
+// ─── Layer state ───────────────────────────────────────────────────────────
+
+let michlerOn      = true;
+let michlerOpacity = 0.85;
+let gpsLat         = null;
+let gpsLon         = null;
+
+const activeLayers = new Map(); // sheet name → L.tileLayer
+
+function makeLayer(sheet) {
+  return L.tileLayer(`${BASE}/${sheet.name}/MapServer/tile/{z}/{y}/{x}`, {
+    maxNativeZoom: MAX_NATIVE_ZOOM,
+    maxZoom: MAX_ZOOM,
+    opacity: michlerOpacity,
+    attribution: 'Michler Maps · NPS / National Archives',
+    crossOrigin: true,
+    errorTileUrl: BLANK
+  });
+}
+
+// ─── Core update ───────────────────────────────────────────────────────────
+//
+// Ranking strategy:
+//   WITH GPS — score each sheet by distance from the GPS point to the
+//              nearest edge of the sheet's bounding box. A sheet the user
+//              is standing inside scores 0 and always wins.
+//   WITHOUT GPS — score by distance from sheet centre to the viewport box.
+//
+// Take the MAX_LAYERS nearest, add/remove layers to match.
+
+function updateLayers() {
+  if (!michlerOn) {
+    for (const [, layer] of activeLayers) map.removeLayer(layer);
+    activeLayers.clear();
+    return;
+  }
+
+  let ranked;
+
+  if (gpsLat !== null) {
+    ranked = SHEETS
+      .map(s => ({ s, d: distSqPointToBox(gpsLat, gpsLon, s) }))
+      .sort((a, b) => a.d - b.d)
+      .map(x => x.s);
+  } else {
+    const b = map.getBounds();
+    const S = b.getSouth(), N = b.getNorth(), W = b.getWest(), E = b.getEast();
+    ranked = SHEETS
+      .map(s => ({ s, d: distSqCentreToBox(s, S, N, W, E) }))
+      .sort((a, b) => a.d - b.d)
+      .map(x => x.s);
+  }
+
+  const wanted = new Set(ranked.slice(0, MAX_LAYERS).map(s => s.name));
+
+  // Remove layers no longer wanted
+  for (const [name, layer] of activeLayers) {
+    if (!wanted.has(name)) {
+      map.removeLayer(layer);
+      activeLayers.delete(name);
+    }
+  }
+
+  // Add newly wanted layers
+  for (const name of wanted) {
+    if (!activeLayers.has(name)) {
+      const sheet = SHEETS.find(s => s.name === name);
+      const layer = makeLayer(sheet);
+      layer.addTo(map);
+      activeLayers.set(name, layer);
+    }
+  }
+}
+
+// Debounced map move handler
+let moveTimer = null;
+map.on('moveend zoomend', () => {
+  clearTimeout(moveTimer);
+  moveTimer = setTimeout(updateLayers, 200);
+});
+
+updateLayers();
+
+// ─── Buttons ───────────────────────────────────────────────────────────────
+
+const toggleBtn = document.getElementById('btn-toggle');
+toggleBtn.addEventListener('click', () => {
+  michlerOn = !michlerOn;
+  updateLayers();
+  if (michlerOn) {
+    toggleBtn.textContent = '🗺 Show Streets';
+    showStatus('Michler maps on', 1500);
+  } else {
+    toggleBtn.textContent = '🗺 Show Michler';
+    showStatus('Street map only', 1500);
+  }
+});
+
+const opacitySteps = [0.85, 0.65, 0.4, 1.0];
+let opacityIdx = 0;
+document.getElementById('btn-opacity').addEventListener('click', () => {
+  opacityIdx = (opacityIdx + 1) % opacitySteps.length;
+  michlerOpacity = opacitySteps[opacityIdx];
+  for (const [, layer] of activeLayers) layer.setOpacity(michlerOpacity);
+  showStatus(`Opacity: ${Math.round(michlerOpacity * 100)}%`, 1500);
+});
+
+document.getElementById('btn-center').addEventListener('click', () => {
+  if (gpsLat !== null) {
+    map.setView([gpsLat, gpsLon], 15);
+  } else {
+    showStatus('No GPS fix yet', 2000);
+  }
+});
+
+// ─── GPS ───────────────────────────────────────────────────────────────────
+
+let gpsMarker      = null;
+let accuracyCircle = null;
+let firstFix       = true;
+
+const gpsIcon = L.divIcon({
+  className: '',
+  html: '<div class="gps-dot"></div>',
+  iconSize: [16, 16], iconAnchor: [8, 8]
+});
+
+function onPosition(pos) {
+  const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+
+  gpsLat = lat;
+  gpsLon = lng;
+
+  document.getElementById('coords').textContent =
+    `${lat.toFixed(6)}°N   ${lng.toFixed(6)}°W   ±${Math.round(accuracy)} m`;
+
+  if (!gpsMarker) {
+    gpsMarker = L.marker([lat, lng], { icon: gpsIcon, zIndexOffset: 2000 }).addTo(map);
+    accuracyCircle = L.circle([lat, lng], {
+      radius: accuracy, color: '#ef4444', fillColor: '#ef4444',
+      fillOpacity: 0.08, weight: 1.5
+    }).addTo(map);
+  } else {
+    gpsMarker.setLatLng([lat, lng]);
+    accuracyCircle.setLatLng([lat, lng]).setRadius(accuracy);
+  }
+
+  if (firstFix) {
+    firstFix = false;
+    map.setView([lat, lng], 15);
+    showStatus('GPS lock ✓', 2000);
+  }
+
+  // Re-rank sheets on every GPS update so the sheet under the dot
+  // always scores 0 distance and is guaranteed to be loaded.
+  updateLayers();
+}
+
+function onGpsError(err) {
+  const msgs = {
+    1: 'Location access denied — check Safari Settings → Privacy → Location',
+    2: 'Position unavailable',
+    3: 'GPS timed out — retrying…'
+  };
+  showStatus(msgs[err.code] || err.message, 5000);
+  document.getElementById('coords').textContent = 'GPS unavailable';
+}
+
+if (navigator.geolocation) {
+  showStatus('Acquiring GPS…', 0);
+  navigator.geolocation.watchPosition(onPosition, onGpsError, {
+    enableHighAccuracy: true,
+    timeout: 20000,
+    maximumAge: 0
+  });
+} else {
+  showStatus('Geolocation not supported', 0);
+}
+</script>
+</body>
+</html>
